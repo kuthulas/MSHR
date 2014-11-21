@@ -258,13 +258,11 @@ update_way_list(struct cache_set_t *set,	/* set contained way chain */
 
 /* create and initialize a cache structure with MSHR */
 struct cache_t *                      /* pointer to cache created */
-cache_create_mshr(char *name,         /* name of the cache */
+mshr_cache_create(char *name,         /* name of the cache */
                   int nsets,          /* total number of sets in cache */
                   int bsize,          /* block (line) size of cache */
                   int balloc,         /* allocate data space for blocks? */
                   int usize,          /* size of user data to alloc w/blks */
-                  int mshrs,                 /* # mshrs */
-                  int mshr_targets,
                   int assoc,                 /* associativity of cache */
                   enum cache_policy policy,  /* replacement policy w/in sets */
                   /* block access function, see description w/in struct cache def */
@@ -272,7 +270,9 @@ cache_create_mshr(char *name,         /* name of the cache */
                                                 md_addr_t baddr, int bsize,
                                                 struct cache_blk_t *blk,
                                                 tick_t now),
-                  unsigned int hit_latency)/* latency in cycles for a hit */
+                  unsigned int hit_latency,    /* latency in cycles for a hit */
+                  int mshrs,                 /* # mshrs */
+                  int mshr_targets)
 {
   struct cache_t *cp;
   struct cache_blk_t *blk;
@@ -327,29 +327,24 @@ cache_create_mshr(char *name,         /* name of the cache */
   cp->bus_free = 0;
 
   /* MSHR */
-  cp->ready = 0;  /* cache ready to serve */
+  cp->ready = 0;      /* indicates that the cache is ready initially */
   if (mshrs > 0) {
-     cp->num_mshrs = mshrs;
-     cp->mshr = (struct cache_mshr *)
-                (malloc(sizeof(struct cache_mshr) * cp->num_mshrs));
+     cp->mshrs = mshrs;
+     cp->mshr = (struct cache_mshr *)(malloc(sizeof(struct cache_mshr) * cp->mshrs));
   }
   else {
-     cp->num_mshrs = -1; /* no mshrs */
+     cp->mshrs = -1;  /* Not using any mshr */
      cp->mshr=NULL;
   }
 
-  if (mshr_targets > 0) {
-     cp->num_mshr_targets = mshr_targets;
-  }
-  else {
-     cp->num_mshr_targets = 1;
-  }
+  if (mshr_targets > 0) cp->mshr_targets = mshr_targets;
+  else cp->mshr_targets = 1;
 
-  /* initialize the MSHRs */
-  for (i=0; i<cp->num_mshrs; i++)
+  /* initialize the mshr structure */
+  for (i=0; i<cp->mshrs; i++)
   {
      cp->mshr[i].block_addr=0;
-     cp->mshr[i].ntarget=0;
+     cp->mshr[i].target_no=0;
      cp->mshr[i].ready=0;
   }
 
@@ -369,12 +364,12 @@ cache_create_mshr(char *name,         /* name of the cache */
   cp->invalidations = 0;
 
   /* initialize mshr stats */
-  cp->mshr_hits = 0;
   cp->mshr_misses = 0;
   cp->mshr_full = 0;
   cp->mshr_accesses = 0;
   cp->mshr_hit_rate = 0;
   cp->hits_under_misses = 0;
+
 
   /* blow away the last block accessed */
   cp->last_tagset = 0;
@@ -454,8 +449,8 @@ cache_create(char *name,    /* name of the cache */
              tick_t now),
        unsigned int hit_latency)  /* latency in cycles for a hit */
 {
-  return cache_create_mshr(name, nsets, bsize, balloc, usize, 0, 0, assoc,
-    policy, blk_access_fn, hit_latency);
+  return mshr_cache_create(name, nsets, bsize, balloc, usize, assoc,
+    policy, blk_access_fn, hit_latency, 0, 0);
 }
 
 /* parse policy */
@@ -528,24 +523,26 @@ cache_reg_stats(struct cache_t *cp,	/* cache instance */
   sprintf(buf, "%s.inv_rate", name);
   sprintf(buf1, "%s.invalidations / %s.accesses", name, name);
   stat_reg_formula(sdb, buf, "invalidation rate (i.e., invs/ref)", buf1, NULL);
-
+  
   /* MSHR stats */
-  if (cp->num_mshrs != -1) {
+  if (cp->mshrs != -1) {
 
      sprintf(buf, "%s.mshr_accesses", name);
-     sprintf(buf1, "%s.mshr_hits + %s.mshr_misses + %s.mshr_full + %s.mshr_target_full", name, name, name, name);
+     sprintf(buf1, "%s.hits_under_misses + %s.mshr_misses + %s.mshr_full", name, name, name);
      stat_reg_formula(sdb, buf, "total number of mshr accesses", buf1, "%12.0f");
-     sprintf(buf, "%s.mshr_hits", name);
 
-     stat_reg_counter(sdb, buf, "total number of mshr hits", &cp->mshr_hits, 0, NULL);
+     sprintf(buf, "%s.hits_under_misses", name);
+     stat_reg_counter(sdb, buf, "total number of mshr hits under misses", &cp->hits_under_misses, 0, NULL);
+
      sprintf(buf, "%s.mshr_misses", name);
      stat_reg_counter(sdb, buf, "total number of mshr misses", &cp->mshr_misses, 0, NULL);
+
      sprintf(buf, "%s.mshr_hit_rate", name);
-     sprintf(buf1, "%s.mshr_hits / %s.mshr_accesses", name, name);
+     sprintf(buf1, "%s.hits_under_misses / %s.mshr_accesses", name, name);
      stat_reg_formula(sdb, buf, "mshr hit rate (i.e., hits/accesses)", buf1, NULL);
 
      sprintf(buf, "%s.mshr_full", name);
-     stat_reg_counter(sdb, buf, "total number of mshr-full events", &cp->mshr_full, 0, NULL);
+     stat_reg_counter(sdb, buf, "total number of mshr full events", &cp->mshr_full, 0, NULL);
   }
 }
 
@@ -577,12 +574,13 @@ cache_access(struct cache_t *cp,	/* cache to access */
 	     enum mem_cmd cmd,		/* access type, Read or Write */
 	     md_addr_t addr,		/* address of access */
 	     void *vp,			/* ptr to buffer for input/output */
-       tick_t *mem_ready,   /* ptr to mem_ready of ruu_station */
+       tick_t *mem_ready,   /* ptr to ruu_station's memory ready status */
 	     int nbytes,		/* number of bytes to access */
 	     tick_t now,		/* time of access */
 	     byte_t **udata,		/* for return of user data ptr */
 	     md_addr_t *repl_addr)	/* for address of replaced block */
 {
+
   byte_t *p = vp;
   md_addr_t tag = CACHE_TAG(cp, addr);
   md_addr_t set = CACHE_SET(cp, addr);
@@ -592,7 +590,7 @@ cache_access(struct cache_t *cp,	/* cache to access */
 
   /* MSHR */
   md_addr_t baddr =  CACHE_TAGSET(cp, addr);
-  int i, hit_mshr = -1;
+  int i, mshr_index = -1;
 
   /* default replacement address */
   if (repl_addr)
@@ -647,21 +645,19 @@ cache_access(struct cache_t *cp,	/* cache to access */
 
   /* **MISS** */
 
-  /* Look for an empty MSHR */
-  if ((now) && (cp->num_mshrs != -1)) {
-     for (i = 0; i < cp->num_mshrs; i++) {
-        if (cp->mshr[i].ready <= now) {
-           /* we have an empty mshr, so we can proceed with the miss */
-           hit_mshr = i;
+  /* Look for an empty MSHR to allocate */
+  if ((now) && (cp->mshrs != -1)) {
+     for (i = 0; i < cp->mshrs; i++) {
+        if (cp->mshr[i].ready <= now) { /* empty MSHR found */
+           mshr_index = i;
            cp->mshr_misses++;
            break;
         }
      }
 
-     if (hit_mshr == -1) { /* no empty mshr, so stall! */
+     if (mshr_index == -1) { /* no free mshr found, return signal to stall */
        cp->mshr_full++;
        *mem_ready = cp->ready;
-       cp->mshr_full_stall += cp->ready - now;
        return MSHR_FULL;
      }
   }
@@ -751,13 +747,13 @@ cache_access(struct cache_t *cp,	/* cache to access */
     link_htab_ent(cp, &cp->sets[set], repl);
 
   /* update MSHR status */
-  if ((now) && (cp->num_mshrs != -1)) {
+  if ((now) && (cp->mshrs != -1)) {
 
-     cp->mshr[hit_mshr].ready = repl->ready;
-     cp->mshr[hit_mshr].block_addr = baddr;
-     cp->mshr[hit_mshr].ntarget = 1;
+     cp->mshr[mshr_index].ready = repl->ready;
+     cp->mshr[mshr_index].block_addr = baddr;
+     cp->mshr[mshr_index].target_no = 1;
 
-     for (i = 0, cp->ready = cp->mshr[0].ready; i < cp->num_mshrs; i++) {
+     for (i = 0, cp->ready = cp->mshr[0].ready; i < cp->mshrs; i++) {
         if (cp->mshr[i].ready < cp->ready)
            cp->ready = cp->mshr[i].ready;
      }
@@ -771,33 +767,29 @@ cache_access(struct cache_t *cp,	/* cache to access */
   
   /* **HIT** */
 
-  /* mshr: check for secondary miss */
-  if ((now) && (cp->num_mshrs != -1)) {
+  if ((now) && (cp->mshrs != -1)) {
 
-     /* is this a secondary miss? */
+     /* check for secondary miss */
      if (blk->ready > now) {
-        /* search for matching mshr */
-        for (i = 0; i < cp->num_mshrs; i++) {
+        /* search for mshr that matches the address */
+        for (i = 0; i < cp->mshrs; i++) {
            if (cp->mshr[i].block_addr == baddr && cp->mshr[i].ready > now) {
 
-              /* target space is available? */
-              if (cp->mshr[i].ntarget < cp->num_mshr_targets) {
-                 hit_mshr = i;
-                 cp->mshr[i].ntarget++;
-                 cp->mshr_hits++;
+              /* check if a target is free in the matched mshr */
+              if (cp->mshr[i].target_no < cp->mshr_targets) {
+                 mshr_index = i;
+                 cp->mshr[i].target_no++;
+                 cp->hits_under_misses++;
                  break;
               }
               else {
-                 /* target space full, so stall! */
+                 /* target space full, return stall signal */
                  *mem_ready = cp->mshr[i].ready;
-                 cp->mshr_target_full++;
-                 cp->mshr_target_full_stall += cp->mshr[i].ready - now;
-                 return MSHR_TARGET_FULL;
+                 cp->mshr_full++;
+                 return MSHR_FULL;
               }
            }
        }
-       /* a secondary miss must have pre-allocated mshr by its primary miss */
-       assert(hit_mshr != -1);
     }
   }
 
@@ -837,32 +829,29 @@ cache_access(struct cache_t *cp,	/* cache to access */
   
   /* **FAST HIT** */
 
-  /* mshr: check for secondary miss */
-  if ((now) && (cp->num_mshrs != -1)) {
+  if ((now) && (cp->mshrs != -1)) {
 
-     /* is this a secondary miss? */
+     /* check for secondary miss */
      if (blk->ready > now) {
-        /* search for matching mshr */
-        for (i = 0; i < cp->num_mshrs; i++) {
+        /* search for mshr that matches the address */
+        for (i = 0; i < cp->mshrs; i++) {
            if (cp->mshr[i].block_addr == baddr && cp->mshr[i].ready > now) {
 
-              /* target space is available? */
-              if (cp->mshr[i].ntarget < cp->num_mshr_targets) {
-                 hit_mshr = i;
-                 cp->mshr[i].ntarget++;
-                 cp->mshr_hits++;
+              /* check if a target is free in the matched mshr */
+              if (cp->mshr[i].target_no < cp->mshr_targets) {
+                 mshr_index = i;
+                 cp->mshr[i].target_no++;
+                 cp->hits_under_misses++;
                  break;
               }
               else {
-                 /* target space full, so stall! */
+                 /* target space full, return stall signal */
                  *mem_ready = cp->mshr[i].ready;
-                 cp->mshr_target_full++;
-                 return MSHR_TARGET_FULL;
+                 cp->mshr_full++;
+                 return MSHR_FULL;
               }
            }
        }
-       /* a secondary miss must have pre-allocated mshr by its primary miss */
-       assert(hit_mshr != -1);
     }
   }
 

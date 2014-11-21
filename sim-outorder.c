@@ -1031,9 +1031,9 @@ sim_check_options(struct opt_odb_t *odb,        /* options database */
 	fatal("bad l1 D-cache parms: <name>:<nsets>:<bsize>:<assoc>:<repl>");
       if(strcmp(mshr_enabled, "true")==0){
       printf("MSHR Enabled!\n");
-      cache_dl1 = cache_create_mshr(name, nsets, bsize, /* balloc */FALSE,
-			       /* usize */0, mshr_size, 4, assoc, cache_char2policy(c),
-			       dl1_access_fn, /* hit lat */cache_dl1_lat);
+      cache_dl1 = mshr_cache_create(name, nsets, bsize, /* balloc */FALSE,
+			       /* usize */0, assoc, cache_char2policy(c),
+			       dl1_access_fn, /* hit lat */cache_dl1_lat, mshr_size, 4);
       }
       else 
         cache_dl1 = cache_create(name, nsets, bsize, /* balloc */FALSE,
@@ -2215,7 +2215,7 @@ ruu_commit(void)
 			cache_access(cache_dl1, Write, (LSQ[LSQ_head].addr&~3),
 				     NULL, &LSQ[LSQ_head].mem_ready, 4, sim_cycle, NULL, NULL);
 		        if(lat < 0) {
-              // MSHR full or no free targets; stall
+              // mshr full or no targets available, stall 
               break;
             }
             else{
@@ -2664,7 +2664,7 @@ ruu_issue(void)
        node && n_issued < ruu_issue_width;
        node = next_node)
     {
-      int cache_access_blocked = 0;
+      int is_cache_blocked = 0;
       next_node = node->next;
 
       /* still valid? */
@@ -2772,25 +2772,14 @@ ruu_issue(void)
 
             /* mshr or target is not available */
             if (load_lat < 0) {
-                cache_access_blocked = 1;
+                is_cache_blocked = 1;
                 rs->issued = FALSE;
                 readyq_enqueue(rs);
-                //printf("%10d (issue-) mshr or target full (%d: ready at %d with %d) - %d\n",
-                //(int)sim_cycle, count_mshr(cache_dl1,sim_cycle),
-                //(int) rs->mem_ready, load_lat, cache_dl1->ready);
             }
             else {
-                cache_access_blocked = 0;
+                is_cache_blocked = 0;
                 if (load_lat > cache_dl1_lat) {
                     events |= PEV_CACHEMISS;
-                    //printf("%10d (issue ) cache miss (%d) - %d\n",
-                    //(int)sim_cycle, count_mshr(cache_dl1,sim_cycle),
-                    //cache_dl1->ready);
-                }
-                else {
-                    //printf("%10d (issue ) cache hit (%d) - %d\n",
-                    //(int)sim_cycle, count_mshr(cache_dl1,sim_cycle),
-                    //cache_dl1->ready);
                 }
             }
 				}
@@ -2802,7 +2791,7 @@ ruu_issue(void)
 			    }
 
 			  /* all loads and stores must to access D-TLB */
-			  if (!cache_access_blocked && dtlb && MD_VALID_ADDR(rs->addr))
+			  if (!is_cache_blocked && dtlb && MD_VALID_ADDR(rs->addr))
 			    {
 			      /* access the D-DLB, NOTE: this code will
 				 initiate speculative TLB misses */
@@ -2816,7 +2805,7 @@ ruu_issue(void)
 			      load_lat = MAX(tlb_lat, load_lat);
 			    }
 
-          if(!cache_access_blocked){
+          if(!is_cache_blocked){
 			  /* use computed cache access latency */
 			  eventq_queue_event(rs, sim_cycle + load_lat);
 

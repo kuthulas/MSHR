@@ -145,15 +145,13 @@ struct cache_set_t
 };
 
 /* MSHR */
-
 #define MSHR_FULL -1
-#define MSHR_TARGET_FULL -2
 
 struct cache_mshr
 {
-  md_addr_t block_addr;   /* data block address */
-  unsigned int ntarget; /* # targets for secondary misses */
-  tick_t ready; /* MSHR memory ready time */
+  md_addr_t block_addr;   /* Address of the data block */
+  unsigned int target_no; /* Number of targets for secondary misses */
+  tick_t ready; /* Memory ready time for MSHR */
 };
 
 /* cache definition */
@@ -170,9 +168,9 @@ struct cache_t
   unsigned int hit_latency;	/* cache hit latency */
 
   /* MSHR */
-  tick_t ready;   /* indicates time when cache is ready for new instructions after MSHR is full */
-  int num_mshrs;
-  int num_mshr_targets;
+  tick_t ready;   /* Indicates time when cache is ready for new instructions after MSHR is full */
+  int mshrs;     /* Number of MSHRs */
+  int mshr_targets;    /* Number of targets for each MSHR */
   struct cache_mshr *mshr;
 
   /* miss/replacement handler, read/write BSIZE bytes starting at BADDR
@@ -218,15 +216,12 @@ struct cache_t
   counter_t invalidations;	/* total number of external invalidations */
 
   /* MSHR */
-  counter_t mshr_hits;
+
+  counter_t mshr_accesses;
+  counter_t hits_under_misses;
   counter_t mshr_misses;
-  counter_t mshr_accesses; // total # of MSHR accesses
-  counter_t hits_under_misses; // total # of hits under misses in MSHR
-  counter_t mshr_hit_rate; // hit rate (hits/accesses) in MSHR
-  counter_t mshr_full; // total # of full events in MSHR
-  counter_t mshr_target_full;
-  counter_t mshr_full_stall;
-  counter_t mshr_target_full_stall;
+  counter_t mshr_hit_rate;
+  counter_t mshr_full;
 
   /* last block to hit, used to optimize cache hit processing */
   md_addr_t last_tagset;	/* tag of last line accessed */
@@ -242,13 +237,11 @@ struct cache_t
 
 /* create and initialize a cache structure with MSHR */
 struct cache_t *                      /* pointer to cache created */
-cache_create_mshr(char *name,         /* name of the cache */
+mshr_cache_create(char *name,         /* name of the cache */
                   int nsets,          /* total number of sets in cache */
                   int bsize,          /* block (line) size of cache */
                   int balloc,         /* allocate data space for blocks? */
                   int usize,          /* size of user data to alloc w/blks */
-                  int mshrs,                 /* # mshrs */
-                  int mshr_targets,
                   int assoc,                 /* associativity of cache */
                   enum cache_policy policy,  /* replacement policy w/in sets */
                   /* block access function, see description w/in struct cache def */
@@ -256,8 +249,9 @@ cache_create_mshr(char *name,         /* name of the cache */
                                                 md_addr_t baddr, int bsize,
                                                 struct cache_blk_t *blk,
                                                 tick_t now),
-                  unsigned int hit_latency);/* latency in cycles for a hit */
-
+                  unsigned int hit_latency,   /* latency in cycles for a hit */
+                  int mshrs,                  /* number of mshrs */
+                  int mshr_targets);          /* number of mshr targets */
 /* create and initialize a general cache structure */
 struct cache_t *			/* pointer to cache created */
 cache_create(char *name,		/* name of the cache */
